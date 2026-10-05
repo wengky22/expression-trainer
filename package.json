@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "test": "node scripts/test-lexicon.js && node scripts/test-report-data.js"
+    "test": "node scripts/test-lexicon.js && node scripts/test-report-data.js && node scripts/test-ai-feedback.js"
   },
   "keywords": ["expression", "training", "speech", "asr", "chinese"],
   "author": "sisi",
