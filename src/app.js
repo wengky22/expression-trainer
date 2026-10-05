@@ -10,7 +10,7 @@ class ExpressionTrainer {
     this.timerInterval = null;
     this.fullText = '';
     this.sentences = [];
-    this.stats = { fillers: 0, hedges: 0, vagueWords: 0, totalWords: 0, duration: 0 };
+    this.stats = { fillers: 0, hedges: 0, vagueWords: 0, totalWords: 0, noiseChars: 0, duration: 0, fillerCounts: {}, hedgeCounts: {} };
     this.lastFeedbackText = '';
     this.lastReport = '';
 
@@ -140,9 +140,17 @@ class ExpressionTrainer {
     if (this.audioProcessor) { this.audioProcessor.disconnect(); this.audioProcessor = null; }
     if (this.audioContext) { this.audioContext.close(); this.audioContext = null; }
     if (this.mediaStream) { this.mediaStream.getTracks().forEach(t => t.stop()); this.mediaStream = null; }
-    await window.api.stopASR();
+    const { finalText } = await window.api.stopASR();
     this.isRecording = false;
     this.isPaused = false;
+
+    // 停止时尚未断句的尾段也要计入原文，否则最后一句会丢
+    if (finalText) {
+      this.handleASRResult({ text: finalText, isFinal: true });
+    } else {
+      const interim = this.subtitleContainer.querySelector('.interim-line');
+      if (interim) interim.remove();
+    }
 
     clearInterval(this.timerInterval);
     let totalPaused = this.pausedTime;
@@ -167,20 +175,21 @@ class ExpressionTrainer {
   // ===== ASR结果处理 =====
 
   handleASRResult({ text, isFinal }) {
+    const line = this.renderSubtitle(text, isFinal);
     if (isFinal) {
       this.sentences.push(text);
       this.fullText += text;
-      this.analyzeCurrentSentence(text);
+      this.analyzeCurrentSentence(text, line);
 
       // 每30字触发一次AI反馈（语境化精准词建议）
       if (this.fullText.length - this.lastFeedbackText.length >= 30) {
         this.requestRealtimeFeedback();
       }
     }
-    this.renderSubtitle(text, isFinal);
   }
 
   renderSubtitle(currentText, isFinal) {
+    let line = null;
     if (isFinal) {
       // 移除interim
       const interim = this.subtitleContainer.querySelector('.interim-line');
@@ -191,10 +200,10 @@ class ExpressionTrainer {
         el.classList.add('old');
       });
 
-      // 新行
-      const line = document.createElement('div');
+      // 新行（高亮在词库分析返回后补上）
+      line = document.createElement('div');
       line.className = 'subtitle-line';
-      line.innerHTML = this.highlightText(currentText);
+      line.textContent = currentText;
       this.subtitleContainer.appendChild(line);
     } else {
       let interim = this.subtitleContainer.querySelector('.interim-line');
@@ -208,30 +217,40 @@ class ExpressionTrainer {
 
     // 自动滚到底
     this.subtitleScroll.scrollTop = this.subtitleScroll.scrollHeight;
+    return line;
   }
 
-  highlightText(text) {
-    let result = text;
-    const vagueWords = ['开心','难过','害怕','生气','不舒服','很好','很多','很快','很大','很小','好看','不好','喜欢','讨厌','觉得','想想'];
-    vagueWords.forEach(w => {
-      result = result.replace(new RegExp(w, 'g'), `<span class="vague">${w}</span>`);
+  // 按词库分析返回的 spans 高亮，与统计口径一致
+  highlightText(text, spans = []) {
+    const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    let html = '';
+    let pos = 0;
+    spans.forEach(({ start, end, type }) => {
+      html += esc(text.slice(pos, start)) + `<span class="${type}">${esc(text.slice(start, end))}</span>`;
+      pos = end;
     });
-    const fillerPatterns = /(嗯|啊|呃|额|那个|就是|然后|这个|对吧|是吧|反正|基本上)/g;
-    result = result.replace(fillerPatterns, '<span class="filler">$1</span>');
-    const hedgePatterns = /(可能|也许|大概|应该|我觉得|好像|似乎|或许|不一定|差不多|感觉)/g;
-    result = result.replace(hedgePatterns, '<span class="hedge">$1</span>');
-    return result;
+    return html + esc(text.slice(pos));
   }
 
   // ===== 分析 =====
 
-  async analyzeCurrentSentence(text) {
+  // 把一句话的词库分析结果累加进统计（报告末尾的数据表由此生成）
+  addToStats(analysis) {
+    const count = (counts, items) => items.forEach(({ word }) => { counts[word] = (counts[word] || 0) + 1; });
+    this.stats.fillers += analysis.fillers.length;
+    this.stats.hedges += analysis.hedges.length;
+    this.stats.vagueWords += analysis.vagueWords.length;
+    this.stats.totalWords += analysis.totalWords;
+    this.stats.noiseChars += analysis.noiseChars;
+    count(this.stats.fillerCounts, analysis.fillers);
+    count(this.stats.hedgeCounts, analysis.hedges);
+  }
+
+  async analyzeCurrentSentence(text, line) {
     const analysis = await window.api.analyzeText(text);
     if (analysis) {
-      this.stats.fillers += analysis.fillers.length;
-      this.stats.hedges += analysis.hedges.length;
-      this.stats.vagueWords += analysis.vagueWords.length;
-      this.stats.totalWords += analysis.totalWords;
+      if (line) line.innerHTML = this.highlightText(text, analysis.spans);
+      this.addToStats(analysis);
       this.updateStatsDisplay();
       // 碰到笼统词 → 立刻在反馈栏弹出替换建议
       if (analysis.vagueWords && analysis.vagueWords.length > 0) {
@@ -258,7 +277,7 @@ class ExpressionTrainer {
     this.statHedges.textContent = this.stats.hedges;
     this.statVague.textContent = this.stats.vagueWords;
     if (this.stats.totalWords > 0) {
-      const density = ((this.stats.totalWords - this.stats.fillers - this.stats.hedges) / this.stats.totalWords * 100).toFixed(0);
+      const density = ((this.stats.totalWords - this.stats.noiseChars) / this.stats.totalWords * 100).toFixed(0);
       this.statDensity.textContent = density + '%';
     }
   }
@@ -379,7 +398,7 @@ class ExpressionTrainer {
   }
 
   resetStats() {
-    this.stats = { fillers: 0, hedges: 0, vagueWords: 0, totalWords: 0, duration: 0 };
+    this.stats = { fillers: 0, hedges: 0, vagueWords: 0, totalWords: 0, noiseChars: 0, duration: 0, fillerCounts: {}, hedgeCounts: {} };
     this.updateStatsDisplay();
     this.feedbackContent.innerHTML = '';
   }
@@ -461,19 +480,15 @@ class ExpressionTrainer {
     this.sentences = sentences;
 
     for (const sentence of sentences) {
+      const text = sentence.trim();
       const line = document.createElement('div');
       line.className = 'subtitle-line';
-      line.innerHTML = this.highlightText(sentence.trim());
       this.subtitleContainer.appendChild(line);
 
       // 词库分析
-      const analysis = await window.api.analyzeText(sentence);
-      if (analysis) {
-        this.stats.fillers += analysis.fillers.length;
-        this.stats.hedges += analysis.hedges.length;
-        this.stats.vagueWords += analysis.vagueWords.length;
-        this.stats.totalWords += analysis.totalWords;
-      }
+      const analysis = await window.api.analyzeText(text);
+      line.innerHTML = this.highlightText(text, analysis ? analysis.spans : []);
+      if (analysis) this.addToStats(analysis);
     }
 
     this.stats.duration = 0; // 粘贴模式没有时长
