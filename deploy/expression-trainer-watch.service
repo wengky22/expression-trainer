@@ -1,0 +1,14 @@
+# systemd 用户服务：自动处理 NAS 上的新录音
+# 安装：cp deploy/expression-trainer-watch.service ~/.config/systemd/user/ && systemctl --user enable --now expression-trainer-watch
+# ExecStart 中的 node 路径按本机实际安装位置修改（which node）
+[Unit]
+Description=表达训练：自动为新录音生成报告
+
+[Service]
+WorkingDirectory=%h/claude/expression-trainer
+ExecStart=%h/.nvm/versions/node/v22.19.0/bin/node scripts/watch-recordings.js
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
