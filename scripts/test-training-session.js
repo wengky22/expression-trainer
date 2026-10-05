@@ -93,6 +93,12 @@ const CASES = [
     assert.ok(text.includes('| 待核实 |  | 模型判为传达，但没有可核对的原文依据。听得出来 |'), text);
     assert.ok(text.includes('要点传达 0/3，部分 1，待核实 1，缺失 1。'), text);
   }],
+  ['核对结果：模型把核心意思摊平成字符串时也能解析，取值照样校验', () => {
+    const flat = JSON.stringify({ core: '不一致', reason: '只听出是测试', points: POINTS_OK });
+    const check = training.parseCheck(flat, INTENT, TEXT);
+    assert.deepStrictEqual(check.core, { status: '不一致', reason: '只听出是测试' });
+    assert.throws(() => training.parseCheck(JSON.stringify({ core: '大体一致', points: POINTS_OK }), INTENT, TEXT), /核心意思的结果/);
+  }],
   ['核对结果：要点条数不对、结果不在选项里、不是 JSON 都报错', () => {
     assert.throws(() => training.parseCheck(checkJSON(POINTS_OK.slice(0, 2)), INTENT, TEXT), /3 个要点，返回了 2 个/);
     assert.throws(() => training.parseCheck(checkJSON(POINTS_OK, { core: { status: '基本一致' } }), INTENT, TEXT), /核心意思的结果/);
