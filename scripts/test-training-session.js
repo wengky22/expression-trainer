@@ -1,6 +1,6 @@
 /**
  * 训练流程回归测试：node scripts/test-training-session.js
- * 意图解析、核对结果校验、前后比较表、待处理录音列表；模型调用用本地假接口
+ * 意图解析、核对结果校验、前后比较表、待处理录音列表、话题锁；模型调用用本地假接口
  */
 
 const assert = require('assert');
@@ -8,8 +8,10 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const training = require('../lib/training-session');
 const { listPending } = require('../lib/recording-report');
+const { withFileLock } = require('../lib/fs-utils');
 
 const INTENT = { core: '要做一个评估表达的工具', points: ['听众能复述核心意思', '和原意核对', '记录前后变化'] };
 const TEXT = '我想做一个工具就是听我说完以后能复述出来然后跟我原来想说的对一下';
@@ -29,23 +31,24 @@ const POINTS_OK = [
 
 const stats = (duration, totalWords, fillers) => ({ duration, totalWords, fillers, hedges: 0, noiseChars: fillers });
 
-function startServer(handler) {
+// delayMs：模拟模型调用耗时，让并发处理的读写交错
+function startServer(handler, delayMs) {
   return new Promise(resolve => {
     const server = http.createServer((req, res) => {
       let body = '';
       req.on('data', chunk => { body += chunk; });
-      req.on('end', () => {
+      req.on('end', () => setTimeout(() => {
         const content = handler(JSON.parse(body));
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content } }] }));
-      });
+      }, delayMs));
     });
     server.listen(0, '127.0.0.1', () => resolve(server));
   });
 }
 
-async function withFakeModel(handler, fn) {
-  const server = await startServer(handler);
+async function withFakeModel(handler, fn, delayMs = 0) {
+  const server = await startServer(handler, delayMs);
   const settings = { provider: 'custom', baseUrl: `http://127.0.0.1:${server.address().port}`, model: 'fake' };
   try {
     return await fn(settings);
@@ -72,14 +75,23 @@ const CASES = [
     assert.throws(() => training.parseIntent('{\\rtf1\\ansi 内容}'), /RTF/);
     assert.throws(() => training.parseIntent('\n  \n'), /空的/);
   }],
-  ['核对结果：正常解析；摘录加了标点也算在原文里，编造的标出来', () => {
+  ['核对结果：正常解析；摘录加了标点也算在原文里，原文里找不到的记为待核实', () => {
     const points = [...POINTS_OK];
     points[0] = { status: '传达', evidence: '能复述出来，', reason: '' };
     points[1] = { status: '部分', evidence: '原文里没有这句', reason: '' };
     const check = training.parseCheck('```json\n' + checkJSON(points) + '\n```', INTENT, TEXT);
     assert.strictEqual(check.core.status, '部分一致');
-    assert.deepStrictEqual(check.points.map(p => p.evidenceFound), [true, false, true]);
-    assert.strictEqual(training.formatPointCount(check), '1/3（部分 1）');
+    assert.deepStrictEqual(check.points.map(p => p.status), ['传达', '待核实', '缺失']);
+    assert.strictEqual(training.formatPointCount(check), '1/3（待核实 1）');
+  }],
+  ['核对结果：判为传达但没给依据的也记为待核实，不计入传达', () => {
+    const points = [{ status: '传达', evidence: '', reason: '听得出来' }, ...POINTS_OK.slice(1)];
+    const check = training.parseCheck(checkJSON(points), INTENT, TEXT);
+    assert.deepStrictEqual(check.points.map(p => p.status), ['待核实', '部分', '缺失']);
+    assert.strictEqual(training.formatPointCount(check), '0/3（部分 1，待核实 1）');
+    const text = training.formatCheck(INTENT, check);
+    assert.ok(text.includes('| 待核实 |  | 模型判为传达，但没有可核对的原文依据。听得出来 |'), text);
+    assert.ok(text.includes('要点传达 0/3，部分 1，待核实 1，缺失 1。'), text);
   }],
   ['核对结果：要点条数不对、结果不在选项里、不是 JSON 都报错', () => {
     assert.throws(() => training.parseCheck(checkJSON(POINTS_OK.slice(0, 2)), INTENT, TEXT), /3 个要点，返回了 2 个/);
@@ -131,6 +143,57 @@ const CASES = [
       const changed = training.formatRecord('周会汇报', { ...INTENT, core: '改过的意图' }, history.attempts);
       assert.ok(changed.includes('| 1\\* |') && changed.includes('修改前的意图'), changed);
     });
+  }],
+  ['改了意图后不和旧意图的那次比较；改回原意图时和原意图的上一次比较', async () => {
+    const calls = [];
+    const INTENT2 = { core: '建议推迟上线', points: ['听众能复述核心意思', '和原意核对', '记录前后变化'] };
+    await withFakeModel(body => {
+      const json = Boolean(body.response_format);
+      calls.push(json ? 'check' : 'compare');
+      return json ? checkJSON(POINTS_OK) : '### 改进了什么\n无\n\n### 还差什么\n无';
+    }, async settings => {
+      const history = { attempts: [] };
+      const run = (file, intent) => training.runTraining({ file, intent, fullText: TEXT, stats: stats(60, 100, 0), report: REPORT, history, settings });
+      await run('/x/a.m4a', INTENT);
+      const changed = await run('/x/b.m4a', INTENT2);
+      assert.ok(changed.sections.includes('表达意图和之前几次不同，这次不做前后比较'), changed.sections);
+      assert.ok(!changed.sections.includes('| 指标 |'), changed.sections);
+      const back = await run('/x/c.m4a', INTENT);
+      assert.ok(back.sections.includes('| 指标 | 第 1 次 | 第 3 次（本次） |'), back.sections);
+      assert.deepStrictEqual(calls, ['check', 'check', 'check', 'compare']);
+    });
+  }],
+  ['同一话题同时处理两个录音：话题锁让第二个等第一个写完，记录不丢', async () => {
+    const dir = tempDir();
+    try {
+      await withFakeModel(body => (body.response_format ? checkJSON(POINTS_OK) : '### 改进了什么\n无\n\n### 还差什么\n无'), async settings => {
+        const run = file => training.trainAndRecord({ dir, file, intent: INTENT, fullText: TEXT, stats: stats(60, 100, 0), report: REPORT, settings, lockOptions: { pollMs: 20 } });
+        const results = await Promise.all([run(path.join(dir, 'a.m4a')), run(path.join(dir, 'b.m4a'))]);
+        assert.deepStrictEqual(results.map(r => r.attemptNo).sort(), [1, 2]);
+        const history = training.loadHistory(dir);
+        assert.deepStrictEqual(history.attempts.map(a => a.file).sort(), ['a.m4a', 'b.m4a']);
+        assert.ok(fs.readFileSync(path.join(dir, training.RECORD_FILE), 'utf-8').includes('| 2 |'));
+        assert.ok(!fs.existsSync(path.join(dir, training.LOCK_FILE)), '锁文件没有删除');
+      }, 150);
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  }],
+  ['话题锁：持有者进程已退出的残留锁直接接管；被占用时等待超时报错', async () => {
+    const dir = tempDir();
+    const lock = path.join(dir, '.test.lock');
+    try {
+      const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+      fs.writeFileSync(lock, JSON.stringify({ pid: deadPid, host: os.hostname(), at: Date.now() }));
+      assert.strictEqual(await withFileLock(lock, async () => 'ok', { waitMs: 200, pollMs: 20 }), 'ok');
+      assert.ok(!fs.existsSync(lock));
+
+      fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, host: os.hostname(), at: Date.now() }));
+      await assert.rejects(withFileLock(lock, async () => 'ok', { waitMs: 200, pollMs: 20 }), /被另一个进程占用/);
+      assert.ok(fs.existsSync(lock), '别人的锁不能删');
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
   }],
   ['模型返回的核对结果格式不对时报错，不写进记录', async () => {
     await withFakeModel(() => '不是 JSON', async settings => {
