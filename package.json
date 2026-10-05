@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "test": "node scripts/test-lexicon.js && node scripts/test-report-data.js && node scripts/test-ai-feedback.js",
+    "test": "node scripts/test-lexicon.js && node scripts/test-report-data.js && node scripts/test-ai-feedback.js && node scripts/test-training-session.js",
     "process": "node scripts/process-recording.js",
     "watch": "node scripts/watch-recordings.js"
   },

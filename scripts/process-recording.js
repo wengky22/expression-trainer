@@ -1,5 +1,6 @@
 /**
  * 处理单个录音，在旁边生成「录音名.报告.md」：node scripts/process-recording.js <录音文件>
+ * 录音所在文件夹里有 意图.txt / 意图.md 时按训练流程处理（意图核对、与上一次比较、更新训练记录）
  * 配置见 ~/.config/expression-trainer/pipeline.json，环境变量 API_KEY / PROVIDER / MODEL / OLLAMA_URL 可覆盖
  */
 
