@@ -99,15 +99,21 @@ connect_nas() {
 
 # ---------- 话题和意图 ----------
 
-# 意图文件：第一行核心意思，后面每行一个要点；先写临时文件再改名，监视程序不会读到写了一半的意图
+# 意图文件：第一行「核心意思：…」，后面每行「- 要点」；监视程序解析时只去掉这一层前缀，
+# 内容本身以 - 或编号开头也能原样读回。先写临时文件再改名，监视程序不会读到写了一半的意图
 write_intent() {
-  local dir=$1 core points
+  local dir=$1 core points p tmp=$1/.意图-$$.tmp
   core=$(ask $'这个话题还没有表达意图。\n\n用一句话写出这次想表达的核心意思：' "") || return 1
   core=$(trim "$core")
   [[ -n $core ]] || return 1
   points=$(ask $'要点（可选）：多个要点之间用；分隔，留空表示不写。' "") || points=""
-  { print -r -- $core; print -r -- ${points//[；;]/$'\n'} } | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d' > "$dir/.意图.tmp" \
-    && mv "$dir/.意图.tmp" "$dir/意图.txt"
+  {
+    print -r -- "核心意思：$core"
+    for p in ${(f)${points//[；;]/$'\n'}}; do
+      p=$(trim "$p")
+      [[ -n $p ]] && print -r -- "- $p"
+    done
+  } > $tmp && mv $tmp "$dir/意图.txt"
 }
 
 choose_topic() {
@@ -124,6 +130,9 @@ choose_topic() {
     name=$(ask "新话题的名称：" "") || exit 0
     name=$(trim "${name//[\/:]/-}")
     [[ -n $name ]] || die "话题名称不能为空"
+    # . 开头的文件夹监视程序会跳过，「..」还会指到录音目录外面
+    [[ $name != .* ]] || die "话题名称不能以 . 开头"
+    [[ $name != *[[:cntrl:]]* ]] || die "话题名称里有控制字符"
     mkdir -p "$REC_DIR/$name" || die "无法创建文件夹：$REC_DIR/$name"
     pick=$name
   fi
@@ -157,7 +166,7 @@ choose_mic() {
 }
 
 record_once() {
-  local count stamp file size dur dest tmp
+  local count stamp file size dur
   count=($DEST/*.(m4a|mp3|wav|aac|flac|ogg|opus|webm|amr|mp4)(.))
   stamp=$(date +%Y-%m-%d_%H.%M.%S)   # 文件名里不能有冒号
   file=$CACHE_DIR/$stamp.m4a
@@ -178,17 +187,29 @@ record_once() {
     fi
   fi
 
+  upload $file $size
+}
+
+# upload 本机录音 大小：存进 $DEST，文件名记在 SAVED
+upload() {
+  local file=$1 size=$2 stamp=${1:t:r} base n=1 taken dest tmp
+  # 不覆盖已有文件：报告按去掉扩展名的文件名对应录音，同名的录音、报告、失败文件任何一个在，都换成 -2、-3…
+  base=$stamp
+  while taken=($DEST/$base.*); (( ${#taken} )); do
+    base=$stamp-$(( ++n ))
+  done
   # 先用隐藏文件名上传，传完再改名：监视程序跳过 . 开头的文件，不会处理到一半的录音
-  dest=$DEST/$stamp.m4a
-  tmp=$DEST/.上传中-$stamp.m4a
+  dest=$DEST/$base.m4a
+  tmp=$DEST/.上传中-$base.m4a
   print "\n上传到 NAS：$dest"
-  if cp -X $file $tmp && mv $tmp $dest && [[ $(stat -f %z $dest) == $size ]]; then
+  # mv -n 不覆盖：检查之后有人抢先放了同名文件时不改名，临时文件还在，按失败处理
+  if cp -X $file $tmp && mv -n $tmp $dest && [[ ! -e $tmp && $(stat -f %z $dest) == $size ]]; then
     rm -f $file
   else
     rm -f $tmp
     die "上传失败，录音保留在本机：$file"
   fi
-  SAVED=$stamp.m4a
+  SAVED=$base.m4a
 }
 
 main() {

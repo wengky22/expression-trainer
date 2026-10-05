@@ -74,6 +74,11 @@ const CASES = [
   ['意图：RTF 和空文件报错', () => {
     assert.throws(() => training.parseIntent('{\\rtf1\\ansi 内容}'), /RTF/);
     assert.throws(() => training.parseIntent('\n  \n'), /空的/);
+    assert.throws(() => training.parseIntent('核心意思：\n- 要点'), /没有核心意思/);
+  }],
+  ['意图：按「核心意思：」和「- 」写的文件读回不变，内容本身以 - 或编号开头也不会被去掉', () => {
+    const intent = training.parseIntent('核心意思：-5% 也算达标\n- -5% 的变化\n- 1. 先说结论\n');
+    assert.deepStrictEqual(intent, { core: '-5% 也算达标', points: ['-5% 的变化', '1. 先说结论'] });
   }],
   ['核对结果：正常解析；摘录加了标点也算在原文里，原文里找不到的记为待核实', () => {
     const points = [...POINTS_OK];
