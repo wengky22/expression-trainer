@@ -36,12 +36,24 @@ tar xvf sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2
 # https://huggingface.co/csukuangfj/sherpa-onnx-streaming-paraformer-bilingual-zh-en
 ```
 
+处理录音文件（`npm run watch` / `npm run process`）还要下载离线 paraformer 中英模型。流式模型会漏掉每句话的最后一个字，录音文件改用离线模型整段识别；只有 `model.int8.onnx` 和 `tokens.txt` 用得到，包里约 800MB 的 `model.onnx` 可以删掉：
+
+```bash
+cd models
+wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-2024-03-09.tar.bz2
+tar xvf sherpa-onnx-paraformer-zh-2024-03-09.tar.bz2
+rm sherpa-onnx-paraformer-zh-2024-03-09/model.onnx
+```
+
 下载后 `models/` 目录应包含：
 ```
 models/
-└── sherpa-onnx-streaming-paraformer-bilingual-zh-en/
-    ├── encoder.int8.onnx
-    ├── decoder.int8.onnx
+├── sherpa-onnx-streaming-paraformer-bilingual-zh-en/   # 应用里的实时字幕
+│   ├── encoder.int8.onnx
+│   ├── decoder.int8.onnx
+│   └── tokens.txt
+└── sherpa-onnx-paraformer-zh-2024-03-09/               # 录音文件转写
+    ├── model.int8.onnx
     └── tokens.txt
 ```
 ### 3. 启动应用
